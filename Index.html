@@ -1,0 +1,307 @@
+/**
+ * ============================================================================
+ * GUGUS EYANG KARTAWIBAWA - INVENTARISASI & DOKUMENTASI KEGIATAN
+ * Google Apps Script Backend (Code.gs)
+ * ============================================================================
+ * 
+ * Petunjuk Instalasi:
+ * 1. Buka Google Sheets (buat spreadsheet baru atau biarkan script membuatnya otomatis).
+ * 2. Buka menu Extensions > Apps Script.
+ * 3. Hapus kode default, lalu tempelkan seluruh kode ini.
+ * 4. Jalankan fungsi `setupDatabase()` sekali untuk membuat struktur sheet yang diperlukan.
+ * 5. Deploy sebagai Web App (Publish > Deploy as Web App / New Deployment):
+ *    - Execute as: Me (saya)
+ *    - Who has access: Anyone (Siapa saja, termasuk anonim)
+ * 6. Salin URL Web App dan gunakan pada aplikasi frontend Anda jika terintegrasi, 
+ *    atau gunakan mode standalone/local testing.
+ */
+
+// Nama Spreadsheet Utama
+const SPREADSHEET_NAME = "DB_Gugus_Eyang_Kartawibawa";
+
+/**
+ * Setup Database: Membuat atau memverifikasi Spreadsheet dan Sheet yang dibutuhkan.
+ */
+function setupDatabase() {
+  let ss;
+  const files = DriveApp.getFilesByName(SPREADSHEET_NAME);
+  
+  if (files.hasNext()) {
+    ss = SpreadsheetApp.open(files.next());
+  } else {
+    ss = SpreadsheetApp.create(SPREADSHEET_NAME);
+  }
+  
+  // Sheet 1: Kegiatan (Inventarisasi Administrasi & Dokumentasi)
+  let sheetKegiatan = ss.getSheetByName("Kegiatan");
+  if (!sheetKegiatan) {
+    sheetKegiatan = ss.insertSheet("Kegiatan");
+    sheetKegiatan.appendRow([
+      "id", 
+      "kelompok", 
+      "jenisKegiatan", 
+      "tanggalKegiatan", 
+      "lokasiKegiatan", 
+      "administrasiUrl", 
+      "keteranganAdmin", 
+      "dokumentasiUrl", 
+      "keteranganDok", 
+      "createdAt",
+      "updatedBy"
+    ]);
+    sheetKegiatan.setFrozenRows(1);
+    // Styling Header
+    sheetKegiatan.getRange("A1:K1").setBackground("#1e293b").setFontColor("#ffffff").setFontWeight("bold");
+  }
+
+  // Sheet 2: Users (Manajemen Akses Password Custom)
+  let sheetUsers = ss.getSheetByName("Users");
+  if (!sheetUsers) {
+    sheetUsers = ss.insertSheet("Users");
+    sheetUsers.appendRow(["username", "password", "role", "namaLengkap"]);
+    sheetUsers.setFrozenRows(1);
+    sheetUsers.getRange("A1:D1").setBackground("#1e293b").setFontColor("#ffffff").setFontWeight("bold");
+    
+    // Default Admin & Anggota Credentials
+    sheetUsers.appendRow(["admin", "karta2026", "Admin", "Administrator Gugus"]);
+    sheetUsers.appendRow(["k3s", "k3s123", "Operator", "Pengurus K3S"]);
+    sheetUsers.appendRow(["guru", "guru123", "Operator", "Guru Kelas / Mata Pelajaran"]);
+  }
+
+  // Hapus Sheet1 bawaan jika masih ada dan kosong
+  const defaultSheet = ss.getSheetByName("Sheet1");
+  if (defaultSheet && ss.getNumSheets() > 2) {
+    ss.deleteSheet(defaultSheet);
+  }
+
+  Logger.log("Setup Database Berhasil! URL Spreadsheet: " + ss.getUrl());
+  return ss.getUrl();
+}
+
+/**
+ * Handle HTTP GET Requests
+ */
+function doGet(e) {
+  const action = e && e.parameter && e.parameter.action ? e.parameter.action : "view";
+  
+  if (action === "setup") {
+    const url = setupDatabase();
+    return ContentService.createTextOutput(JSON.stringify({status: "success", spreadsheetUrl: url}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  if (action === "getData") {
+    return getAllData();
+  }
+  
+  // Default: Return Web App Info or HTML if served directly
+  return HtmlService.createHtmlOutput("<h3>Gugus Eyang Kartawibawa API Active. Gunakan endpoint action=getData atau POST.</h3>");
+}
+
+/**
+ * Handle HTTP POST Requests (Login, Add, Update, Delete)
+ */
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+
+    if (action === "login") {
+      return handleLogin(data.username, data.password);
+    } else if (action === "addKegiatan") {
+      return addKegiatan(data.payload);
+    } else if (action === "updateKegiatan") {
+      return updateKegiatan(data.payload);
+    } else if (action === "deleteKegiatan") {
+      return deleteKegiatan(data.id);
+    } else if (action === "addUser") {
+      return addUser(data.payload);
+    } else if (action === "getUsers") {
+      return getUsersList();
+    } else {
+      return createJsonResponse({status: "error", message: "Aksi tidak dikenali."});
+    }
+  } catch (error) {
+    return createJsonResponse({status: "error", message: error.toString()});
+  }
+}
+
+/**
+ * Autentikasi Custom Password
+ */
+function handleLogin(username, password) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Users");
+  const rows = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === username && rows[i][1] === password) {
+      return createJsonResponse({
+        status: "success",
+        user: {
+          username: rows[i][0],
+          role: rows[i][2],
+          namaLengkap: rows[i][3]
+        }
+      });
+    }
+  }
+  
+  return createJsonResponse({status: "error", message: "Username atau Password salah!"});
+}
+
+/**
+ * Mengambil Seluruh Data Kegiatan & Users
+ */
+function getAllData() {
+  try {
+    const ss = getSpreadsheet();
+    
+    // Data Kegiatan
+    const sheetKegiatan = ss.getSheetByName("Kegiatan");
+    const rowsK = sheetKegiatan.getDataRange().getValues();
+    const headersK = rowsK[0];
+    const kegiatanList = [];
+    
+    for (let i = 1; i < rowsK.length; i++) {
+      let obj = {};
+      for (let j = 0; j < headersK.length; j++) {
+        obj[headersK[j]] = rowsK[i][j];
+      }
+      kegiatanList.push(obj);
+    }
+    
+    // Data Users (tanpa password untuk keamanan client)
+    const sheetUsers = ss.getSheetByName("Users");
+    const rowsU = sheetUsers.getDataRange().getValues();
+    const usersList = [];
+    for (let i = 1; i < rowsU.length; i++) {
+      usersList.push({
+        username: rowsU[i][0],
+        role: rowsU[i][2],
+        namaLengkap: rowsU[i][3]
+      });
+    }
+
+    return createJsonResponse({
+      status: "success",
+      kegiatan: kegiatanList,
+      users: usersList
+    });
+  } catch (err) {
+    return createJsonResponse({status: "error", message: err.toString()});
+  }
+}
+
+/**
+ * Menambah Data Kegiatan Baru
+ */
+function addKegiatan(payload) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Kegiatan");
+  
+  const id = "KEG-" + new Date().getTime();
+  const timestamp = new Date().toISOString();
+  
+  sheet.appendRow([
+    id,
+    payload.kelompok,
+    payload.jenisKegiatan,
+    payload.tanggalKegiatan,
+    payload.lokasiKegiatan,
+    payload.administrasiUrl,
+    payload.keteranganAdmin || "",
+    payload.dokumentasiUrl,
+    payload.keteranganDok || "",
+    timestamp,
+    payload.updatedBy || "System"
+  ]);
+  
+  return createJsonResponse({status: "success", message: "Data kegiatan berhasil disimpan.", id: id});
+}
+
+/**
+ * Memperbarui Data Kegiatan
+ */
+function updateKegiatan(payload) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Kegiatan");
+  const rows = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === payload.id) {
+      sheet.getRange(i + 1, 2).setValue(payload.kelompok);
+      sheet.getRange(i + 1, 3).setValue(payload.jenisKegiatan);
+      sheet.getRange(i + 1, 4).setValue(payload.tanggalKegiatan);
+      sheet.getRange(i + 1, 5).setValue(payload.lokasiKegiatan);
+      sheet.getRange(i + 1, 6).setValue(payload.administrasiUrl);
+      sheet.getRange(i + 1, 7).setValue(payload.keteranganAdmin || "");
+      sheet.getRange(i + 1, 8).setValue(payload.dokumentasiUrl);
+      sheet.getRange(i + 1, 9).setValue(payload.keteranganDok || "");
+      sheet.getRange(i + 1, 11).setValue(payload.updatedBy || "System");
+      
+      return createJsonResponse({status: "success", message: "Data kegiatan berhasil diperbarui."});
+    }
+  }
+  
+  return createJsonResponse({status: "error", message: "ID Kegiatan tidak ditemukan."});
+}
+
+/**
+ * Menghapus Data Kegiatan
+ */
+function deleteKegiatan(id) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Kegiatan");
+  const rows = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === id) {
+      sheet.deleteRow(i + 1);
+      return createJsonResponse({status: "success", message: "Data kegiatan berhasil dihapus."});
+    }
+  }
+  
+  return createJsonResponse({status: "error", message: "ID tidak ditemukan untuk dihapus."});
+}
+
+/**
+ * Menambah User Akses Baru
+ */
+function addUser(payload) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName("Users");
+  const rows = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === payload.username) {
+      return createJsonResponse({status: "error", message: "Username sudah terdaftar!"});
+    }
+  }
+  
+  sheet.appendRow([payload.username, payload.password, payload.role, payload.namaLengkap]);
+  return createJsonResponse({status: "success", message: "User baru berhasil ditambahkan."});
+}
+
+/**
+ * Helper: Ambil Instance Spreadsheet
+ */
+function getSpreadsheet() {
+  const files = DriveApp.getFilesByName(SPREADSHEET_NAME);
+  if (files.hasNext()) {
+    return SpreadsheetApp.open(files.next());
+  } else {
+    // Buat otomatis jika belum ada
+    const ss = SpreadsheetApp.create(SPREADSHEET_NAME);
+    setupDatabase();
+    return ss;
+  }
+}
+
+/**
+ * Helper: Format JSON Response dengan Header CORS
+ */
+function createJsonResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
